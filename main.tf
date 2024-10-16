@@ -1,4 +1,4 @@
-
+abcds
 resource "aws_vpc" "vpc_network" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
