@@ -1,4 +1,3 @@
-
 resource "aws_vpc" "vpc_network" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
@@ -129,4 +128,71 @@ resource "aws_route_table_association" "private_rt_assoc_2" {
 resource "aws_route_table_association" "private_rt_assoc_3" {
   subnet_id      = aws_subnet.private_subnet_3.id
   route_table_id = aws_route_table.private_rt.id
+}
+
+# Application Security Group
+resource "aws_security_group" "app_sg" {
+  vpc_id = aws_vpc.vpc_network.id
+  name   = "${var.vpc_name}-app-sg"
+
+  ingress {
+    from_port   = var.ingress_ssh_port
+    to_port     = var.ingress_ssh_port
+    protocol    = var.protocol
+    cidr_blocks = [var.cidr_sg]
+  }
+
+  ingress {
+    from_port   = var.ingress_eighty_port
+    to_port     = var.ingress_eighty_port
+    protocol    = var.protocol
+    cidr_blocks = [var.cidr_sg]
+  }
+
+  ingress {
+    from_port   = var.ingress_443_port
+    to_port     = var.ingress_443_port
+    protocol    = var.protocol
+    cidr_blocks = [var.cidr_sg]
+  }
+
+  ingress {
+    from_port   = var.application_port
+    to_port     = var.application_port
+    protocol    = var.protocol
+    cidr_blocks = [var.cidr_sg]
+  }
+
+  egress {
+    from_port   = var.egress_port
+    to_port     = var.egress_port
+    protocol    = var.egress_protocol
+    cidr_blocks = [var.cidr_sg]
+  }
+
+  tags = {
+    Name = "${var.vpc_name}-app-sg"
+  }
+}
+
+# EC2 Instance
+resource "aws_instance" "web_app" {
+  ami                    = var.custom_ami
+  instance_type          = var.instance_type
+  vpc_security_group_ids = [aws_security_group.app_sg.id]
+  subnet_id              = aws_subnet.public_subnet_1.id
+  key_name               = var.key_name
+
+  root_block_device {
+    volume_size           = var.volume_size
+    volume_type           = var.volume_type
+    delete_on_termination = true
+  }
+
+  monitoring              = false
+  disable_api_termination = false
+
+  tags = {
+    Name = "${var.vpc_name}-ec2"
+  }
 }
