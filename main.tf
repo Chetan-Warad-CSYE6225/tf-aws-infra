@@ -175,7 +175,31 @@ resource "aws_security_group" "app_sg" {
   }
 }
 
-# EC2 Instance
+# Database Security Group
+resource "aws_security_group" "db_sg" {
+  vpc_id = aws_vpc.vpc_network.id
+  name   = "${var.vpc_name}-db-sg"
+
+  ingress {
+    from_port       = var.db_port
+    to_port         = var.db_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.vpc_name}-db-sg"
+  }
+}
+
+# EC2 Instance with User Data (moved above RDS Instance)
 resource "aws_instance" "web_app" {
   ami                    = var.custom_ami
   instance_type          = var.instance_type
@@ -192,7 +216,66 @@ resource "aws_instance" "web_app" {
   monitoring              = false
   disable_api_termination = false
 
+  user_data = <<-EOF
+                #!/bin/bash
+                env_file="/opt/webapp/.env"
+
+                DB_HOSTNAME=$(echo "${aws_db_instance.db_instance.endpoint}" | cut -d':' -f1)
+
+                echo "DB_HOST=$DB_HOSTNAME" >> "$env_file"
+                echo "DB_DATABASE=csye6225" >> "$env_file"
+                echo "DB_USERNAME=csye6225" >> "$env_file"
+                echo "DB_PASSWORD=${var.db_password}" >> "$env_file"
+                echo "SERVER_PORT=${var.application_port}" >> "$env_file"
+                # Restart the application service
+                sudo systemctl restart csye6225.service
+                EOF
+
   tags = {
     Name = "${var.vpc_name}-ec2"
+  }
+}
+
+# RDS Parameter Group for PostgreSQL 13
+resource "aws_db_parameter_group" "db_param_group" {
+  name        = "${var.vpc_name}-rds-params"
+  family      = "postgres13" # Set to postgres13
+  description = "Custom parameter group for ${var.db_engine}"
+
+  tags = {
+    Name = "${var.vpc_name}-db-param-group"
+  }
+}
+
+# DB Subnet Group
+resource "aws_db_subnet_group" "db_subnet_group" {
+  name       = "${var.vpc_name}-db-subnet-group"
+  subnet_ids = [aws_subnet.private_subnet_1.id, aws_subnet.private_subnet_2.id, aws_subnet.private_subnet_3.id]
+
+  tags = {
+    Name = "${var.vpc_name}-db-subnet-group"
+  }
+}
+
+# RDS Instance for PostgreSQL 13
+resource "aws_db_instance" "db_instance" {
+  identifier             = "csye6225"
+  engine                 = var.db_engine
+  engine_version         = var.engine_version      # Use PostgreSQL version 13.7
+  instance_class         = var.instance_class      # Compatible instance class
+  allocated_storage      = var.allocated_storage
+  db_subnet_group_name   = aws_db_subnet_group.db_subnet_group.name
+  vpc_security_group_ids = [aws_security_group.db_sg.id]
+  multi_az               = false
+  publicly_accessible    = false
+  username               = var.username
+  password               = var.db_password
+  parameter_group_name   = aws_db_parameter_group.db_param_group.name
+  db_name                = var.db_name
+  port                   = var.db_port
+  skip_final_snapshot    = true
+
+  tags = {
+    Name = "${var.vpc_name}-rds-instance"
   }
 }

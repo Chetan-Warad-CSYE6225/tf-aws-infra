@@ -89,10 +89,9 @@ variable "protocol" {
 }
 
 variable "cidr_sg" {
-  description = "cidr"
+  description = "CIDR for security group"
   type        = string
 }
-
 
 variable "ingress_eighty_port" {
   description = "Port for 80"
@@ -110,7 +109,7 @@ variable "egress_port" {
 }
 
 variable "egress_protocol" {
-  description = "Port for egress"
+  description = "Egress protocol"
   type        = string
 }
 
@@ -128,3 +127,60 @@ variable "instance_type" {
   description = "Type of the instance"
   type        = string
 }
+
+variable "db_port" {
+  description = "Port for the DB"
+  type        = number
+  default     = 5432 # PostgreSQL default port
+}
+
+variable "db_engine" {
+  description = "Database engine"
+  type        = string
+  default     = "postgres"
+}
+
+variable "db_family" {
+  description = "The DB family for the parameter group"
+  type        = string
+  default     = "postgres13" # Set to postgres13
+}
+
+variable "db_engine_version" {
+  description = "Database engine version"
+  type        = string
+  default     = "13.11" # PostgreSQL 13.7
+}
+
+variable "db_password" {
+  description = "The master password for the database"
+  type        = string
+}
+
+variable "engine_version" {
+  description = "RDS Engine version"
+  type        = string
+}
+
+variable "instance_class" {
+  description = "RDS Instance class"
+  type        = string
+}
+
+variable "allocated_storage" {
+  description = "RDS allocated storage"
+  type        = number
+}
+
+variable "username" {
+  description = "RDS username"
+  type        = string
+}
+
+variable "db_name" {
+  description = "RDS db name"
+  type        = string
+}
+
+
+
