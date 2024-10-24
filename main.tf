@@ -261,8 +261,8 @@ resource "aws_db_subnet_group" "db_subnet_group" {
 resource "aws_db_instance" "db_instance" {
   identifier             = "csye6225"
   engine                 = var.db_engine
-  engine_version         = var.engine_version      # Use PostgreSQL version 13.7
-  instance_class         = var.instance_class      # Compatible instance class
+  engine_version         = var.engine_version # Use PostgreSQL version 13.7
+  instance_class         = var.instance_class # Compatible instance class
   allocated_storage      = var.allocated_storage
   db_subnet_group_name   = aws_db_subnet_group.db_subnet_group.name
   vpc_security_group_ids = [aws_security_group.db_sg.id]
