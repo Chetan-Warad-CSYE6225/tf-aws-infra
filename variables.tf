@@ -79,28 +79,18 @@ variable "key_name" {
 }
 
 variable "ingress_ssh_port" {
-  description = "Port for ssh"
+  description = "Port for SSH"
   type        = number
 }
 
 variable "protocol" {
-  description = "Protocol"
+  description = "Protocol for ingress and egress"
   type        = string
 }
 
 variable "cidr_sg" {
   description = "CIDR for security group"
   type        = string
-}
-
-variable "ingress_eighty_port" {
-  description = "Port for 80"
-  type        = number
-}
-
-variable "ingress_443_port" {
-  description = "Port for 443"
-  type        = number
 }
 
 variable "egress_port" {
@@ -113,43 +103,9 @@ variable "egress_protocol" {
   type        = string
 }
 
-variable "volume_size" {
-  description = "Size of the volume"
-  type        = number
-}
-
-variable "volume_type" {
-  description = "Type of the volume"
-  type        = string
-}
-
 variable "instance_type" {
   description = "Type of the instance"
   type        = string
-}
-
-variable "db_port" {
-  description = "Port for the DB"
-  type        = number
-  default     = 5432 # PostgreSQL default port
-}
-
-variable "db_engine" {
-  description = "Database engine"
-  type        = string
-  default     = "postgres"
-}
-
-variable "db_family" {
-  description = "The DB family for the parameter group"
-  type        = string
-  default     = "postgres13" # Set to postgres13
-}
-
-variable "db_engine_version" {
-  description = "Database engine version"
-  type        = string
-  default     = "13.11" # PostgreSQL 13.7
 }
 
 variable "db_password" {
@@ -157,19 +113,53 @@ variable "db_password" {
   type        = string
 }
 
-variable "engine_version" {
-  description = "RDS Engine version"
+variable "route53_zone_id" {
+  description = "Route 53 hosted zone ID"
   type        = string
 }
 
-variable "instance_class" {
-  description = "RDS Instance class"
+variable "domain_name" {
+  description = "Domain name for Route 53 record"
   type        = string
 }
 
-variable "allocated_storage" {
-  description = "RDS allocated storage"
+# Additional variables for RDS configuration
+variable "db_engine" {
+  description = "Database engine"
+  type        = string
+  default     = "postgres"
+}
+
+variable "db_port" {
+  description = "Database port"
   type        = number
+  default     = 5432
+}
+
+variable "engine_version" {
+  description = "RDS engine version"
+  type        = string
+  default     = "13.11"
+}
+
+variable "volume_type" {
+  description = "The type of volume for the EC2 instance"
+  type        = string
+  default     = "gp2"
+}
+
+
+variable "db_family" {
+  description = "Database family for RDS"
+  type        = string
+  default     = "postgres13"
+}
+
+
+
+variable "db_name" {
+  description = "RDS database name"
+  type        = string
 }
 
 variable "username" {
@@ -177,10 +167,60 @@ variable "username" {
   type        = string
 }
 
-variable "db_name" {
-  description = "RDS db name"
+variable "instance_class" {
+  description = "RDS instance class"
   type        = string
 }
 
+variable "allocated_storage" {
+  description = "RDS allocated storage size in GB"
+  type        = number
+}
 
+# Newly added variables for security group ingress ports
+variable "ingress_eighty_port" {
+  description = "Port for HTTP (80)"
+  type        = number
+  default     = 80
+}
 
+variable "ingress_443_port" {
+  description = "Port for HTTPS (443)"
+  type        = number
+  default     = 443
+}
+
+# Newly added variables for EC2 instance volume size
+variable "volume_size" {
+  description = "Size of the EC2 instance volume"
+  type        = number
+  default     = 20
+}
+
+variable "db_engine_version" {
+  description = "Database engine version"
+  type        = string
+  default     = "13.11"
+}
+
+# Additional variables for IAM and S3
+variable "bucket_name" {
+  description = "Name of the S3 bucket to store application data"
+  type        = string
+}
+
+variable "iam_role_name" {
+  description = "Name for the IAM role attached to EC2"
+  type        = string
+  default     = "EC2CloudWatchS3AccessRole"
+}
+
+variable "keyID" {
+  description = "Access Key ID"
+  type        = string
+}
+
+variable "key" {
+  description = "Access key "
+  type        = string
+}
