@@ -228,7 +228,7 @@ resource "aws_security_group" "app_sg" {
 
 resource "aws_route53_record" "app_record" {
   zone_id = var.route53_zone_id
-  name    = "demo.chetanwarad.me" 
+  name    = "demo.chetanwarad.me"
   type    = "A"
 
   alias {
