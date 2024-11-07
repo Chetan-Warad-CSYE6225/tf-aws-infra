@@ -145,6 +145,372 @@ resource "aws_route_table_association" "private_rt_assoc_3" {
 }
 
 #######################################
+# Load Balancer Setup
+#######################################
+
+
+#######################################
+# Load Balancer Security Group
+#######################################
+
+resource "aws_security_group" "lb_security_group" {
+  name        = "${var.vpc_name}-load-balancer-sg"
+  description = "Security group for the load balancer"
+  vpc_id      = aws_vpc.vpc_network.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.vpc_name}-LoadBalancerSG"
+  }
+}
+
+#######################################
+# Application Security Group (app_sg)
+#######################################
+
+resource "aws_security_group" "app_sg" {
+  vpc_id = aws_vpc.vpc_network.id
+  name   = "${var.vpc_name}-app-sg"
+
+  # Allow HTTP/HTTPS traffic only from the load balancer security group
+  ingress {
+    from_port       = var.application_port
+    to_port         = var.application_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.lb_security_group.id] # Only from LB SG
+  }
+
+  # SSH access for administrative purposes
+  ingress {
+    from_port   = var.ingress_ssh_port
+    to_port     = var.ingress_ssh_port
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # Replace with a specific IP if needed for SSH
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.vpc_name}-app-sg"
+  }
+}
+
+resource "aws_route53_record" "app_record" {
+  zone_id = var.route53_zone_id
+  name    = "demo.chetanwarad.me"
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.app_load_balancer.dns_name
+    zone_id                = aws_lb.app_load_balancer.zone_id
+    evaluate_target_health = true
+  }
+}
+
+
+
+#######################################
+# Auto Scaling Group and Launch Template
+#######################################
+
+# Launch Template
+
+# Launch Template with User Data Script for Auto Scaling Group
+resource "aws_launch_template" "web_app_launch_template" {
+  name          = "csye6225_asg_template"
+  image_id      = var.custom_ami
+  instance_type = var.instance_type
+  key_name      = var.key_name
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2_instance_profile.name
+  }
+  vpc_security_group_ids = [aws_security_group.app_sg.id]
+
+  # User data script for configuring EC2 instance
+  user_data = base64encode(<<-EOF
+    #!/bin/bash
+    # Define environment variables
+    env_file="/opt/webapp/.env"
+    DB_HOSTNAME=$(echo "${aws_db_instance.db_instance.endpoint}" | cut -d':' -f1)
+
+    # Create .env file for the application
+    echo "DB_HOST=$DB_HOSTNAME" >> "$env_file"
+    echo "DB_DATABASE=csye6225" >> "$env_file"
+    echo "DB_USERNAME=csye6225" >> "$env_file"
+    echo "DB_PASSWORD=${var.db_password}" >> "$env_file"
+    echo "SERVER_PORT=${var.application_port}" >> "$env_file"
+    echo "REGION=${var.region}" >> "$env_file"
+    echo "AWS_ACCESS_KEY_ID=${var.keyID}" >> "$env_file"
+    echo "AWS_SECRET_ACCESS_KEY=${var.key}" >> "$env_file"
+
+    # Restart application service
+    sudo systemctl restart csye6225.service
+
+    # Download and install CloudWatch Agent
+    wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -O amazon-cloudwatch-agent.deb
+    sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
+
+    # Fetch the InstanceId for CloudWatch dimension
+    INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+
+    # CloudWatch Agent configuration
+    cat <<'CONFIG' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+    {
+      "agent": {
+          "metrics_collection_interval": 10,
+          "logfile": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log"
+      },
+      "logs": {
+          "logs_collected": {
+              "files": {
+                  "collect_list": [
+                      {
+                          "file_path": "/var/log/syslog",
+                          "log_group_name": "EC2AppLogs",
+                          "log_stream_name": "syslog",
+                          "timestamp_format": "%b %d %H:%M:%S"
+                      },
+                      {
+                          "file_path": "/opt/webapp/logs/app.log",
+                          "log_group_name": "EC2AppLogs",
+                          "log_stream_name": "app_log",
+                          "timestamp_format": "%Y-%m-%dT%H:%M:%S.%LZ"
+                      }
+                  ]
+              }
+          }
+      },
+      "metrics": {
+        "append_dimensions": {
+          "InstanceId": "$INSTANCE_ID"
+        },
+        "metrics_collected": {
+          "disk": {
+            "resources": ["/"],
+            "measurement": ["used_percent"],
+            "metrics_collection_interval": 60
+          },
+          "mem": {
+            "measurement": ["mem_used_percent"],
+            "metrics_collection_interval": 60
+          }
+        }
+      }
+    }
+    CONFIG
+
+    # Start CloudWatch Agent
+    sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+        -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+  EOF
+  )
+
+  tags = {
+    Name = "WebAppInstance"
+  }
+}
+
+
+# Auto Scaling Group
+resource "aws_autoscaling_group" "web_app_asg" {
+  launch_template {
+    id      = aws_launch_template.web_app_launch_template.id
+    version = "$Latest"
+  }
+
+  min_size         = var.min_size
+  max_size         = var.max_size
+  desired_capacity = var.desired_capacity
+  vpc_zone_identifier = [
+    aws_subnet.public_subnet_1.id,
+    aws_subnet.public_subnet_2.id,
+    aws_subnet.public_subnet_3.id
+  ]
+
+  health_check_type         = "ELB"
+  health_check_grace_period = var.health_check_grace_period
+  target_group_arns         = [aws_lb_target_group.app_target_group.arn]
+
+  tag {
+    key                 = "Name"
+    value               = "AutoScalingInstance"
+    propagate_at_launch = true
+  }
+}
+
+
+#######################################
+# CloudWatch Metric Alarms for Auto Scaling
+#######################################
+
+# CloudWatch Metric Alarm for Scaling Up
+resource "aws_cloudwatch_metric_alarm" "scale_up_alarm" {
+  alarm_name          = "${var.vpc_name}-scale-up-alarm"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 120
+  statistic           = "Average"
+  threshold           = var.scale_up_cpu_threshold # Set your CPU threshold for scaling up
+  alarm_description   = "Alarm to trigger scale up when CPU exceeds threshold"
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.web_app_asg.name
+  }
+
+  alarm_actions = [aws_autoscaling_policy.scale_up_policy.arn] # Connects to scale-up policy
+
+  tags = {
+    Name = "${var.vpc_name}-ScaleUpAlarm"
+  }
+}
+
+# CloudWatch Metric Alarm for Scaling Down
+resource "aws_cloudwatch_metric_alarm" "scale_down_alarm" {
+  alarm_name          = "${var.vpc_name}-scale-down-alarm"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 120
+  statistic           = "Average"
+  threshold           = var.scale_down_cpu_threshold # Set your CPU threshold for scaling down
+  alarm_description   = "Alarm to trigger scale down when CPU is below threshold"
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.web_app_asg.name
+  }
+
+  alarm_actions = [aws_autoscaling_policy.scale_down_policy.arn] # Connects to scale-down policy
+
+  tags = {
+    Name = "${var.vpc_name}-ScaleDownAlarm"
+  }
+}
+
+
+
+# Auto Scaling Policy for scaling up
+resource "aws_autoscaling_policy" "scale_up_policy" {
+  name                   = "scale-up-policy"
+  scaling_adjustment     = var.scale_up_adjustment
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = var.scale_up_cooldown
+  autoscaling_group_name = aws_autoscaling_group.web_app_asg.name
+}
+
+# Auto Scaling Policy for scaling down
+resource "aws_autoscaling_policy" "scale_down_policy" {
+  name                   = "scale-down-policy"
+  scaling_adjustment     = var.scale_down_adjustment
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = var.scale_down_cooldown
+  autoscaling_group_name = aws_autoscaling_group.web_app_asg.name
+}
+
+
+# Create an Application Load Balancer
+resource "aws_lb" "app_load_balancer" {
+  name               = "app-load-balancer"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.lb_security_group.id]
+  subnets            = [aws_subnet.public_subnet_1.id, aws_subnet.public_subnet_2.id, aws_subnet.public_subnet_3.id]
+
+  tags = {
+    Name = "AppLoadBalancer"
+  }
+}
+
+# Target Group for Load Balancer
+resource "aws_lb_target_group" "app_target_group" {
+  name     = "app-target-group"
+  port     = var.application_port
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.vpc_network.id
+
+  health_check {
+    path                = "/healthz"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 3
+    unhealthy_threshold = 2
+    matcher             = "200-299"
+  }
+
+  tags = {
+    Name = "AppTargetGroup"
+  }
+}
+
+# Listener for Load Balancer
+resource "aws_lb_listener" "app_listener" {
+  load_balancer_arn = aws_lb.app_load_balancer.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_target_group.arn
+  }
+}
+
+
+#######################################
+# EC2 Instance Configuration (if needed)
+#######################################
+
+# Existing EC2 Instance Configuration
+#resource "aws_instance" "web_app" {
+#  ami                    = var.custom_ami
+# instance_type          = var.instance_type
+#  vpc_security_group_ids = [aws_security_group.app_sg.id]
+#  subnet_id              = aws_subnet.public_subnet_1.id
+#  key_name               = var.key_name
+#  iam_instance_profile   = aws_iam_instance_profile.ec2_instance_profile.name
+
+#  root_block_device {
+#    volume_size           = var.volume_size
+#    volume_type           = var.volume_type
+#    delete_on_termination = true
+#  }
+
+#  monitoring              = false
+#  disable_api_termination = false
+
+
+
+#######################################
 # S3 Bucket Configuration
 #######################################
 
@@ -245,51 +611,6 @@ resource "aws_security_group" "db_sg" {
   }
 }
 
-# Application Security Group
-resource "aws_security_group" "app_sg" {
-  vpc_id = aws_vpc.vpc_network.id
-  name   = "${var.vpc_name}-app-sg"
-
-  ingress {
-    from_port   = var.ingress_ssh_port
-    to_port     = var.ingress_ssh_port
-    protocol    = var.protocol
-    cidr_blocks = [var.cidr_sg]
-  }
-
-  ingress {
-    from_port   = var.ingress_eighty_port
-    to_port     = var.ingress_eighty_port
-    protocol    = var.protocol
-    cidr_blocks = [var.cidr_sg]
-  }
-
-  ingress {
-    from_port   = var.ingress_443_port
-    to_port     = var.ingress_443_port
-    protocol    = var.protocol
-    cidr_blocks = [var.cidr_sg]
-  }
-
-  ingress {
-    from_port   = var.application_port
-    to_port     = var.application_port
-    protocol    = var.protocol
-    cidr_blocks = [var.cidr_sg]
-  }
-
-  egress {
-    from_port   = var.egress_port
-    to_port     = var.egress_port
-    protocol    = var.egress_protocol
-    cidr_blocks = [var.cidr_sg]
-  }
-
-  tags = {
-    Name = "${var.vpc_name}-app-sg"
-  }
-}
-
 #######################################
 # IAM Roles & Policies for EC2 and S3 Access
 #######################################
@@ -342,119 +663,6 @@ resource "aws_iam_instance_profile" "ec2_instance_profile" {
 }
 
 #######################################
-# EC2 Instance Configuration
-#######################################
-
-# EC2 Instance with CloudWatch Agent for Ubuntu
-resource "aws_instance" "web_app" {
-  ami                    = var.custom_ami
-  instance_type          = var.instance_type
-  vpc_security_group_ids = [aws_security_group.app_sg.id]
-  subnet_id              = aws_subnet.public_subnet_1.id
-  key_name               = var.key_name
-  iam_instance_profile   = aws_iam_instance_profile.ec2_instance_profile.name
-
-  root_block_device {
-    volume_size           = var.volume_size
-    volume_type           = var.volume_type
-    delete_on_termination = true
-  }
-
-  monitoring              = false
-  disable_api_termination = false
-
-  # User Data Script for App & CloudWatch Agent Setup
-  user_data = <<-EOF
-    #!/bin/bash
-    # Define environment variables
-    env_file="/opt/webapp/.env"
-    DB_HOSTNAME=$(echo "${aws_db_instance.db_instance.endpoint}" | cut -d':' -f1)
-
-    # Create .env file for the application
-    echo "DB_HOST=$DB_HOSTNAME" >> "$env_file"
-    echo "DB_DATABASE=csye6225" >> "$env_file"
-    echo "DB_USERNAME=csye6225" >> "$env_file"
-    echo "DB_PASSWORD=${var.db_password}" >> "$env_file"
-    echo "SERVER_PORT=${var.application_port}" >> "$env_file"
-    echo "REGION=${var.region}" >> "$env_file"
-    echo "AWS_ACCESS_KEY_ID=${var.keyID}" >> "$env_file"
-    echo "AWS_SECRET_ACCESS_KEY=${var.key}" >> "$env_file"
-
-    # Restart application service
-    sudo systemctl restart csye6225.service
-
-    # Pass Bucket Name to Application
-    echo "S3_BUCKET=${aws_s3_bucket.private_bucket.bucket}" >> "$env_file"
-
-    # Download and install CloudWatch Agent
-    wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -O amazon-cloudwatch-agent.deb
-    sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
-
-    # Fetch the InstanceId for CloudWatch dimension
-    INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-
-    # Create CloudWatch Agent configuration with InstanceId as a dimension
-    cat <<'CONFIG' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-    {
-      "agent": {
-          "metrics_collection_interval": 10,
-          "logfile": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log"
-      },
-      "logs": {
-          "logs_collected": {
-              "files": {
-                  "collect_list": [
-                      {
-                          "file_path": "/var/log/syslog",
-                          "log_group_name": "EC2AppLogs",
-                          "log_stream_name": "syslog",
-                          "timestamp_format": "%b %d %H:%M:%S"
-                      },
-                      {
-                          "file_path": "/opt/webapp/logs/app.log",
-                          "log_group_name": "EC2AppLogs",
-                          "log_stream_name": "app_log",
-                          "timestamp_format": "%Y-%m-%dT%H:%M:%S.%LZ"
-                      }
-                  ]
-              }
-          }
-      },
-      "metrics": {
-        "append_dimensions": {
-          "InstanceId": "$INSTANCE_ID"
-        },
-        "metrics_collected": {
-          "statsd": {
-            "service_address": ":8125",
-            "metrics_collection_interval": 15,
-            "metrics_aggregation_interval": 300
-          },
-          "disk": {
-            "resources": ["/"],
-            "measurement": ["used_percent"],
-            "metrics_collection_interval": 60
-          },
-          "mem": {
-            "measurement": ["mem_used_percent"],
-            "metrics_collection_interval": 60
-          }
-        }
-      }
-    }
-    CONFIG
-
-    # Start CloudWatch Agent with configuration
-    sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-        -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
-  EOF
-
-  tags = {
-    Name = "${var.vpc_name}-ec2"
-  }
-}
-
-#######################################
 # RDS (PostgreSQL) Configuration
 #######################################
 
@@ -463,6 +671,18 @@ resource "aws_db_parameter_group" "db_param_group" {
   name        = "${var.vpc_name}-rds1-params"
   family      = "postgres13"
   description = "Custom parameter group for ${var.db_engine}"
+
+  parameter {
+    name         = "max_connections"
+    value        = "150"
+    apply_method = "pending-reboot"
+  }
+
+  parameter {
+    name         = "log_statement"
+    value        = "all"
+    apply_method = "pending-reboot"
+  }
 
   tags = {
     Name = "${var.vpc_name}-db-param-group"
@@ -503,30 +723,13 @@ resource "aws_db_instance" "db_instance" {
 }
 
 #######################################
-# Route53 DNS Configuration
-#######################################
-
-# Route 53 A Record for EC2 Instance
-resource "aws_route53_record" "a_record" {
-  zone_id = var.route53_zone_id
-  name    = "${var.profile}.${var.domain_name}"
-  type    = "A"
-  ttl     = 300
-  records = [aws_instance.web_app.public_ip]
-}
-
-#######################################
 # Outputs
 #######################################
 
-# Outputs for S3 Bucket Name, EC2 Instance IP, and DNS
 output "s3_bucket_name" {
   value = aws_s3_bucket.private_bucket.bucket
 }
 
-output "ec2_instance_public_ip" {
-  value = aws_instance.web_app.public_ip
-}
 
 output "route53_dns" {
   value = "http://${var.profile}.${var.domain_name}:${var.application_port}/"
