@@ -304,4 +304,23 @@ variable "domain_name" {
 }
 
 
+variable "sns_topic_name" {
+  description = "Name of the SNS topic for email verification"
+  type        = string
+}
 
+variable "lambda_function_name" {
+  description = "Name of the Lambda function"
+  type        = string
+}
+
+
+variable "sendgrid_api_key" {
+  description = "API key for SendGrid"
+  type        = string
+}
+
+variable "ses_from_email" {
+  description = "The sender email address"
+  type        = string
+}

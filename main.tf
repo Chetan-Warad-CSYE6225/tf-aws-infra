@@ -172,12 +172,7 @@ resource "aws_security_group" "lb_security_group" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  ingress {
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -228,7 +223,7 @@ resource "aws_security_group" "app_sg" {
 
 resource "aws_route53_record" "app_record" {
   zone_id = var.route53_zone_id
-  name    = "demo.chetanwarad.me"
+  name    = "${var.profile}.${var.domain_name}"
   type    = "A"
 
   alias {
@@ -237,6 +232,7 @@ resource "aws_route53_record" "app_record" {
     evaluate_target_health = true
   }
 }
+
 
 
 
@@ -273,9 +269,14 @@ resource "aws_launch_template" "web_app_launch_template" {
     echo "REGION=${var.region}" >> "$env_file"
     echo "AWS_ACCESS_KEY_ID=${var.keyID}" >> "$env_file"
     echo "AWS_SECRET_ACCESS_KEY=${var.key}" >> "$env_file"
+    echo "S3_BUCKET=${aws_s3_bucket.private_bucket.bucket}" >> "$env_file"
+    echo "SNS_TOPIC_ARN=${aws_sns_topic.email_verification.arn}" >> "$env_file"
+
 
     # Restart application service
     sudo systemctl restart csye6225.service
+
+
 
     # Download and install CloudWatch Agent
     wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -O amazon-cloudwatch-agent.deb
@@ -486,29 +487,6 @@ resource "aws_lb_listener" "app_listener" {
 }
 
 
-#######################################
-# EC2 Instance Configuration (if needed)
-#######################################
-
-# Existing EC2 Instance Configuration
-#resource "aws_instance" "web_app" {
-#  ami                    = var.custom_ami
-# instance_type          = var.instance_type
-#  vpc_security_group_ids = [aws_security_group.app_sg.id]
-#  subnet_id              = aws_subnet.public_subnet_1.id
-#  key_name               = var.key_name
-#  iam_instance_profile   = aws_iam_instance_profile.ec2_instance_profile.name
-
-#  root_block_device {
-#    volume_size           = var.volume_size
-#    volume_type           = var.volume_type
-#    delete_on_termination = true
-#  }
-
-#  monitoring              = false
-#  disable_api_termination = false
-
-
 
 #######################################
 # S3 Bucket Configuration
@@ -592,11 +570,15 @@ resource "aws_security_group" "db_sg" {
   vpc_id = aws_vpc.vpc_network.id
   name   = "${var.vpc_name}-db-sg"
 
+  # Allow traffic from both app_sg and lambda_security_group
   ingress {
-    from_port       = var.db_port
-    to_port         = var.db_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.app_sg.id]
+    from_port = var.db_port
+    to_port   = var.db_port
+    protocol  = "tcp"
+    security_groups = [
+      aws_security_group.app_sg.id,
+      aws_security_group.lambda_security_group.id
+    ]
   }
 
   egress {
@@ -610,6 +592,7 @@ resource "aws_security_group" "db_sg" {
     Name = "${var.vpc_name}-db-sg"
   }
 }
+
 
 #######################################
 # IAM Roles & Policies for EC2 and S3 Access
@@ -661,6 +644,9 @@ resource "aws_iam_instance_profile" "ec2_instance_profile" {
   name = "EC2InstanceProfile"
   role = aws_iam_role.ec2_role.name
 }
+
+
+
 
 #######################################
 # RDS (PostgreSQL) Configuration
@@ -722,6 +708,242 @@ resource "aws_db_instance" "db_instance" {
   }
 }
 
+
+
+
+
+#######################################
+# SNS Topic for Email Verification
+#######################################
+resource "aws_sns_topic" "email_verification" {
+  name = "email-verification-topic"
+
+  tags = {
+    Name = "EmailVerificationTopic"
+  }
+}
+
+
+
+
+
+
+#######################################
+# IAM Role for Lambda Function
+#######################################
+resource "aws_iam_role" "lambda_execution_role" {
+  name = "lambda_execution_role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        },
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "LambdaExecutionRole"
+  }
+}
+
+# IAM Policy for Lambda to interact with SNS, RDS, and CloudWatch
+resource "aws_iam_policy" "lambda_sns_rds_policy" {
+  name        = "lambda_sns_rds_policy"
+  description = "Policy to allow Lambda to interact with SNS, RDS, and VPC"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "sns:Publish",
+          "sns:Subscribe"
+        ],
+        Resource = aws_sns_topic.email_verification.arn
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "rds:DescribeDBInstances",
+          "rds:Connect"
+        ],
+        Resource = aws_db_instance.db_instance.arn
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeVpcs"
+        ],
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow",
+        Action   = "logs:*",
+        Resource = "arn:aws:logs:*:*:*"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "LambdaSNSRDSPolicy"
+  }
+}
+
+
+# Attach the IAM policy to the Lambda execution role
+resource "aws_iam_role_policy_attachment" "lambda_policy_attachment" {
+  role       = aws_iam_role.lambda_execution_role.name
+  policy_arn = aws_iam_policy.lambda_sns_rds_policy.arn
+}
+
+#######################################
+# Lambda Function for Email Verification
+#######################################
+resource "aws_lambda_function" "email_verification_function" {
+  filename      = "C:\\Users\\cheta\\Desktop\\csye6225-assignment\\serverless_forked\\serverless.zip"
+  function_name = "email_verification"
+  role          = aws_iam_role.lambda_execution_role.arn
+  handler       = "index.handler"
+  runtime       = "nodejs16.x"
+  timeout       = 30
+  memory_size   = 256
+
+  environment {
+    variables = {
+      DB_HOST             = aws_db_instance.db_instance.endpoint
+      DB_NAME             = var.db_name
+      DB_USER             = var.username
+      DB_PASSWORD         = var.db_password
+      SNS_TOPIC_ARN       = aws_sns_topic.email_verification.arn
+      SENDGRID_FROM_EMAIL = var.ses_from_email
+      EMAIL_REGION        = var.region
+      SENDGRID_API_KEY    = var.sendgrid_api_key
+      DB_PORT             = var.db_port
+      DOMAIN_NAME         = "${var.profile}.${var.domain_name}"
+
+    }
+  }
+
+
+  # VPC configuration for secure private resource access
+  vpc_config {
+    subnet_ids         = [aws_subnet.private_subnet_1.id, aws_subnet.private_subnet_2.id, aws_subnet.private_subnet_3.id] # Subnets for Lambda
+    security_group_ids = [aws_security_group.lambda_security_group.id]                                                    # Security group for Lambda
+  }
+
+
+  tags = {
+    Name = "EmailVerificationLambda"
+  }
+}
+
+
+#######################################
+# Lambda Security Group
+#######################################
+
+resource "aws_security_group" "lambda_security_group" {
+  name        = "lambda-sg"
+  description = "Security group for Lambda to access RDS and the internet"
+  vpc_id      = aws_vpc.vpc_network.id
+
+  # Outbound rule: Allow Lambda to connect to RDS
+  egress {
+    from_port   = var.db_port
+    to_port     = var.db_port
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.vpc_network.cidr_block]
+  }
+
+  # Outbound rule: Allow Lambda to access the internet
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Inbound rule: Allow response traffic from RDS and other VPC resources
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [aws_vpc.vpc_network.cidr_block]
+  }
+
+  tags = {
+    Name = "LambdaSecurityGroup"
+  }
+}
+
+
+#######################################
+# SNS Topic Subscription for Lambda
+#######################################
+resource "aws_sns_topic_subscription" "lambda_subscription" {
+  topic_arn = aws_sns_topic.email_verification.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.email_verification_function.arn
+
+  depends_on = [aws_lambda_function.email_verification_function]
+}
+
+#######################################
+# Permissions for SNS to Invoke Lambda
+#######################################
+resource "aws_lambda_permission" "sns_permission" {
+  statement_id  = "AllowSNSToInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.email_verification_function.function_name
+  principal     = "sns.amazonaws.com"
+  source_arn    = aws_sns_topic.email_verification.arn
+}
+
+
+#######################################
+# NAT Gateway
+#######################################
+
+# Allocate an Elastic IP for the NAT Gateway
+resource "aws_eip" "nat" {
+  domain = "vpc"
+  tags = {
+    Name = "${var.vpc_name}-nat-eip"
+  }
+}
+
+# Create the NAT Gateway
+resource "aws_nat_gateway" "nat_gateway" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public_subnet_1.id
+
+  tags = {
+    Name = "${var.vpc_name}-nat-gateway"
+  }
+}
+
+# Add NAT Gateway route in private route table
+resource "aws_route" "private_nat_route" {
+  route_table_id         = aws_route_table.private_rt.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.nat_gateway.id
+}
+
+
+
+
 #######################################
 # Outputs
 #######################################
@@ -734,3 +956,25 @@ output "s3_bucket_name" {
 output "route53_dns" {
   value = "http://${var.profile}.${var.domain_name}:${var.application_port}/"
 }
+
+output "security_group_lambda" {
+  value = aws_security_group.lambda_security_group.id
+}
+
+
+output "route53_record_name" {
+  value       = "${var.profile}.${var.domain_name}"
+  description = "Dynamically constructed Route 53 record name"
+}
+
+
+#output "subnet_ids" {
+#  value = [
+#    aws_subnet.private_subnet_1.id,
+#    aws_subnet.private_subnet_2.id,
+#    aws_subnet.private_subnet_3.id
+#  ]
+#}
+#output "vpc_id" {
+#  value = aws_vpc.vpc_network.id
+#}
