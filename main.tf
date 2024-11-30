@@ -258,12 +258,12 @@ resource "aws_launch_template" "web_app_launch_template" {
   }
   vpc_security_group_ids = [aws_security_group.app_sg.id]
 
- # Define constants
- #   SECRET_NAME="rds-db-password"
- #   REGION="${var.region}"
+  # Define constants
+  #   SECRET_NAME="rds-db-password"
+  #   REGION="${var.region}"
 
-    # Fetch database password from AWS Secrets Manager
- #   DB_PASSWORD=$(aws secretsmanager get-secret-value --region $REGION --secret-id $SECRET_NAME --query 'SecretString' --output text | jq -r .password)
+  # Fetch database password from AWS Secrets Manager
+  #   DB_PASSWORD=$(aws secretsmanager get-secret-value --region $REGION --secret-id $SECRET_NAME --query 'SecretString' --output text | jq -r .password)
 
 
   # User data script for configuring EC2 instance
@@ -1005,8 +1005,8 @@ resource "aws_kms_key" "secrets_manager_kms" {
 
 # Store RDS Password in Secrets Manager
 resource "aws_secretsmanager_secret" "db_password" {
-  name        = "rds-db-password"
-  kms_key_id  = aws_kms_key.secrets_manager_kms.arn
+  name       = "rds-db-password"
+  kms_key_id = aws_kms_key.secrets_manager_kms.arn
 }
 
 resource "aws_secretsmanager_secret_version" "db_password_version" {
@@ -1016,8 +1016,8 @@ resource "aws_secretsmanager_secret_version" "db_password_version" {
 
 # Store SendGrid API Key in Secrets Manager
 resource "aws_secretsmanager_secret" "sendgrid_api_key" {
-  name        = "sendgrid-api-key"
-  kms_key_id  = aws_kms_key.secrets_manager_kms.arn
+  name       = "sendgrid-api-key"
+  kms_key_id = aws_kms_key.secrets_manager_kms.arn
 }
 
 resource "aws_secretsmanager_secret_version" "sendgrid_api_key_version" {
