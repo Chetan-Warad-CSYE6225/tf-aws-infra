@@ -159,25 +159,28 @@ resource "aws_security_group" "lb_security_group" {
   vpc_id      = aws_vpc.vpc_network.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port        = 80
+    to_port          = 80
+    protocol         = "tcp"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
   }
 
   ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port        = 443
+    to_port          = 443
+    protocol         = "tcp"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
   }
 
 
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
   }
 
   tags = {
@@ -203,17 +206,19 @@ resource "aws_security_group" "app_sg" {
 
   # SSH access for administrative purposes
   ingress {
-    from_port   = var.ingress_ssh_port
-    to_port     = var.ingress_ssh_port
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # Replace with a specific IP if needed for SSH
+    from_port        = var.ingress_ssh_port
+    to_port          = var.ingress_ssh_port
+    protocol         = "tcp"
+    cidr_blocks      = ["0.0.0.0/0"] # Replace with a specific IP if needed for SSH
+    ipv6_cidr_blocks = ["::/0"]
   }
 
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
   }
 
   tags = {
@@ -252,6 +257,14 @@ resource "aws_launch_template" "web_app_launch_template" {
     name = aws_iam_instance_profile.ec2_instance_profile.name
   }
   vpc_security_group_ids = [aws_security_group.app_sg.id]
+
+  # Define constants
+  #   SECRET_NAME="rds-db-password"
+  #   REGION="${var.region}"
+
+  # Fetch database password from AWS Secrets Manager
+  #   DB_PASSWORD=$(aws secretsmanager get-secret-value --region $REGION --secret-id $SECRET_NAME --query 'SecretString' --output text | jq -r .password)
+
 
   # User data script for configuring EC2 instance
   user_data = base64encode(<<-EOF
@@ -585,11 +598,60 @@ resource "aws_security_group" "db_sg" {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [aws_vpc.vpc_network.cidr_block]
   }
 
   tags = {
     Name = "${var.vpc_name}-db-sg"
+  }
+}
+
+# Explicit Rule to Allow Lambda to Access RDS
+#resource "aws_security_group_rule" "allow_lambda_to_rds" {
+#  type                     = "ingress"
+#  from_port                = var.db_port # Port 5432 for PostgreSQL
+#  to_port                  = var.db_port
+#  protocol                 = "tcp"
+#  security_group_id        = aws_security_group.db_sg.id                 # Attach to the RDS SG
+#  source_security_group_id = aws_security_group.lambda_security_group.id # Allow traffic from Lambda SG
+#}
+
+
+#######################################
+# Lambda Security Group
+#######################################
+
+resource "aws_security_group" "lambda_security_group" {
+  name        = "lambda-sg"
+  description = "Security group for Lambda to access RDS and the internet"
+  vpc_id      = aws_vpc.vpc_network.id
+
+  # Outbound rule: Allow Lambda to connect to RDS
+  egress {
+    from_port   = var.db_port
+    to_port     = var.db_port
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.vpc_network.cidr_block]
+  }
+
+  # Outbound rule: Allow Lambda to access the internet
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Inbound rule: Allow response traffic from RDS and other VPC resources
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [aws_vpc.vpc_network.cidr_block]
+  }
+
+  tags = {
+    Name = "LambdaSecurityGroup"
   }
 }
 
@@ -701,7 +763,12 @@ resource "aws_db_instance" "db_instance" {
   parameter_group_name   = aws_db_parameter_group.db_param_group.name
   db_name                = var.db_name
   port                   = var.db_port
-  skip_final_snapshot    = true
+
+  # Enable KMS Encryption
+  #kms_key_id = aws_kms_key.rds_kms.arn
+
+  #skip_final_snapshot = true
+  #apply_immediately   = true
 
   tags = {
     Name = "${var.vpc_name}-rds-instance"
@@ -816,22 +883,25 @@ resource "aws_lambda_function" "email_verification_function" {
   function_name = "email_verification"
   role          = aws_iam_role.lambda_execution_role.arn
   handler       = "index.handler"
-  runtime       = "nodejs16.x"
+  runtime       = "nodejs20.x"
   timeout       = 30
   memory_size   = 256
 
   environment {
     variables = {
-      DB_HOST             = aws_db_instance.db_instance.endpoint
+      DB_HOST = regex("^([^:]+)", aws_db_instance.db_instance.endpoint)[0]
+      #aws_db_instance.db_instance.endpoint
+
       DB_NAME             = var.db_name
-      DB_USER             = var.username
+      DB_USERNAME         = var.username
       DB_PASSWORD         = var.db_password
       SNS_TOPIC_ARN       = aws_sns_topic.email_verification.arn
       SENDGRID_FROM_EMAIL = var.ses_from_email
-      EMAIL_REGION        = var.region
+      REGION              = var.region
       SENDGRID_API_KEY    = var.sendgrid_api_key
-      DB_PORT             = var.db_port
+      DB_PORT             = 5432
       DOMAIN_NAME         = "${var.profile}.${var.domain_name}"
+
 
     }
   }
@@ -850,43 +920,6 @@ resource "aws_lambda_function" "email_verification_function" {
 }
 
 
-#######################################
-# Lambda Security Group
-#######################################
-
-resource "aws_security_group" "lambda_security_group" {
-  name        = "lambda-sg"
-  description = "Security group for Lambda to access RDS and the internet"
-  vpc_id      = aws_vpc.vpc_network.id
-
-  # Outbound rule: Allow Lambda to connect to RDS
-  egress {
-    from_port   = var.db_port
-    to_port     = var.db_port
-    protocol    = "tcp"
-    cidr_blocks = [aws_vpc.vpc_network.cidr_block]
-  }
-
-  # Outbound rule: Allow Lambda to access the internet
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Inbound rule: Allow response traffic from RDS and other VPC resources
-  ingress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = [aws_vpc.vpc_network.cidr_block]
-  }
-
-  tags = {
-    Name = "LambdaSecurityGroup"
-  }
-}
 
 
 #######################################
@@ -918,7 +951,7 @@ resource "aws_lambda_permission" "sns_permission" {
 
 # Allocate an Elastic IP for the NAT Gateway
 resource "aws_eip" "nat" {
-  domain = "vpc"
+  vpc = true
   tags = {
     Name = "${var.vpc_name}-nat-eip"
   }
@@ -940,7 +973,6 @@ resource "aws_route" "private_nat_route" {
   destination_cidr_block = "0.0.0.0/0"
   nat_gateway_id         = aws_nat_gateway.nat_gateway.id
 }
-
 
 
 
