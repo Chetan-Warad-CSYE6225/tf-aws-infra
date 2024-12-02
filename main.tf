@@ -226,6 +226,7 @@ resource "aws_security_group" "app_sg" {
   }
 }
 
+# Create an A record pointing to the ALB
 resource "aws_route53_record" "app_record" {
   zone_id = var.route53_zone_id
   name    = "${var.profile}.${var.domain_name}"
@@ -258,36 +259,59 @@ resource "aws_launch_template" "web_app_launch_template" {
   }
   vpc_security_group_ids = [aws_security_group.app_sg.id]
 
-  # Define constants
-  #   SECRET_NAME="rds-db-password"
-  #   REGION="${var.region}"
-
-  # Fetch database password from AWS Secrets Manager
-  #   DB_PASSWORD=$(aws secretsmanager get-secret-value --region $REGION --secret-id $SECRET_NAME --query 'SecretString' --output text | jq -r .password)
 
 
   # User data script for configuring EC2 instance
   user_data = base64encode(<<-EOF
-    #!/bin/bash
-    # Define environment variables
-    env_file="/opt/webapp/.env"
-    DB_HOSTNAME=$(echo "${aws_db_instance.db_instance.endpoint}" | cut -d':' -f1)
+  #!/bin/bash
+  set -e
 
-    # Create .env file for the application
-    echo "DB_HOST=$DB_HOSTNAME" >> "$env_file"
-    echo "DB_DATABASE=csye6225" >> "$env_file"
-    echo "DB_USERNAME=csye6225" >> "$env_file"
-    echo "DB_PASSWORD=${var.db_password}" >> "$env_file"
-    echo "SERVER_PORT=${var.application_port}" >> "$env_file"
-    echo "REGION=${var.region}" >> "$env_file"
-    echo "AWS_ACCESS_KEY_ID=${var.keyID}" >> "$env_file"
-    echo "AWS_SECRET_ACCESS_KEY=${var.key}" >> "$env_file"
-    echo "S3_BUCKET=${aws_s3_bucket.private_bucket.bucket}" >> "$env_file"
-    echo "SNS_TOPIC_ARN=${aws_sns_topic.email_verification.arn}" >> "$env_file"
+  # Install dependencies
+  sudo apt-get update -y
+  sudo apt-get install -y jq awscli
 
+  exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+  # Define paths and filenames
+
+  src_directory="/opt/webapp/src"
+  env_file="/opt/webapp/.env"
+  
+
+  # Ensure the application directory exists
+  mkdir -p /opt/webapp
+
+  # Retrieve the database credentials from Secrets Manager
+  DB_SECRET=$(aws secretsmanager get-secret-value --secret-id ${aws_secretsmanager_secret.rds_password_secret.id} --region ${var.region})
+  DB_USERNAME=$(echo $DB_SECRET | jq -r '.SecretString | fromjson | .username')
+  DB_PASSWORD=$(echo $DB_SECRET | jq -r '.SecretString | fromjson | .password')
+
+  # Retrieve the database hostname
+  DB_HOSTNAME=$(echo "${aws_db_instance.db_instance.endpoint}" | cut -d':' -f1)
+
+  # Create the .env file with necessary environment variables
+  cat <<EOF2 > $env_file
+  DB_HOST=$DB_HOSTNAME
+  DB_DATABASE=csye6225
+  DB_USERNAME=$DB_USERNAME
+  DB_PASSWORD=$DB_PASSWORD
+  SERVER_PORT=${var.application_port}
+  REGION=${var.region}
+  AWS_ACCESS_KEY_ID=${var.keyID}
+  AWS_SECRET_ACCESS_KEY=${var.key}
+  S3_BUCKET=${aws_s3_bucket.private_bucket.bucket}
+  SNS_TOPIC_ARN=${aws_sns_topic.email_verification.arn}
+  EOF2
+
+    # Copy the .env file to the src directory
+    #sudo cp -f $env_file $src_directory/.env
+
+    # Set permissions for security
+    #chmod 600 $env_file
 
     # Restart application service
-    sudo systemctl restart csye6225.service
+    sudo systemctl restart csye6225.service 
+
 
 
 
@@ -488,16 +512,89 @@ resource "aws_lb_target_group" "app_target_group" {
 }
 
 # Listener for Load Balancer
-resource "aws_lb_listener" "app_listener" {
-  load_balancer_arn = aws_lb.app_load_balancer.arn
-  port              = 80
-  protocol          = "HTTP"
+#resource "aws_lb_listener" "app_listener" {
+#  load_balancer_arn = aws_lb.app_load_balancer.arn
+#  port              = 80
+#  protocol          = "HTTP"
 
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.app_target_group.arn
+#  default_action {
+#    type             = "forward"
+#    target_group_arn = aws_lb_target_group.app_target_group.arn
+#  }
+#}
+
+
+
+#######################################
+# RDS (PostgreSQL) Configuration
+#######################################
+
+# RDS Parameter Group for PostgreSQL
+resource "aws_db_parameter_group" "db_param_group" {
+  name        = "${var.vpc_name}-rds1-params"
+  family      = "postgres13"
+  description = "Custom parameter group for ${var.db_engine}"
+
+  parameter {
+    name         = "max_connections"
+    value        = "150"
+    apply_method = "pending-reboot"
+  }
+
+  parameter {
+    name         = "log_statement"
+    value        = "all"
+    apply_method = "pending-reboot"
+  }
+
+  tags = {
+    Name = "${var.vpc_name}-db-param-group"
   }
 }
+
+# RDS DB Subnet Group
+resource "aws_db_subnet_group" "db_subnet_group" {
+  name       = "${var.vpc_name}-db-subnet1-group"
+  subnet_ids = [aws_subnet.private_subnet_1.id, aws_subnet.private_subnet_2.id, aws_subnet.private_subnet_3.id]
+
+  tags = {
+    Name = "${var.vpc_name}-db-subnet1-group"
+  }
+}
+
+# RDS Instance for PostgreSQL 13
+resource "aws_db_instance" "db_instance" {
+  identifier             = "csye6225"
+  engine                 = var.db_engine
+  engine_version         = var.engine_version
+  instance_class         = var.instance_class
+  allocated_storage      = var.allocated_storage
+  db_subnet_group_name   = aws_db_subnet_group.db_subnet_group.name
+  vpc_security_group_ids = [aws_security_group.db_sg.id]
+  multi_az               = false
+  publicly_accessible    = false
+  username               = var.username
+  #password               = var.db_password
+  password             = random_password.rds_password.result
+  parameter_group_name = aws_db_parameter_group.db_param_group.name
+  db_name              = var.db_name
+  port                 = var.db_port
+
+  # Enable KMS Encryption
+  kms_key_id = aws_kms_key.rds_key.arn
+
+  storage_encrypted   = true
+  skip_final_snapshot = true
+  apply_immediately   = true
+
+  tags = {
+    Name = "${var.vpc_name}-rds-instance"
+  }
+}
+
+
+
+
 
 
 
@@ -517,6 +614,20 @@ resource "aws_s3_bucket" "private_bucket" {
   }
 }
 
+
+# Enable Server-Side Encryption with KMS for S3
+resource "aws_s3_bucket_server_side_encryption_configuration" "bucket_encryption" {
+  bucket = aws_s3_bucket.private_bucket.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.s3_key.arn
+    }
+  }
+}
+
+
 # S3 Bucket Lifecycle Policy for Transition to STANDARD_IA after 30 Days
 resource "aws_s3_bucket_lifecycle_configuration" "bucket_lifecycle" {
   bucket = aws_s3_bucket.private_bucket.id
@@ -532,15 +643,15 @@ resource "aws_s3_bucket_lifecycle_configuration" "bucket_lifecycle" {
 }
 
 # Enable Default Server-Side Encryption for S3 Bucket
-resource "aws_s3_bucket_server_side_encryption_configuration" "bucket_encryption" {
-  bucket = aws_s3_bucket.private_bucket.id
+#resource "aws_s3_bucket_server_side_encryption_configuration" "bucket_encryption" {
+#  bucket = aws_s3_bucket.private_bucket.id
 
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
+#  rule {
+#    apply_server_side_encryption_by_default {
+#      sse_algorithm = "AES256"
+#    }
+#  }
+#}
 
 # S3 Bucket Public Access Block
 resource "aws_s3_bucket_public_access_block" "s3_bucket_access_block" {
@@ -696,8 +807,11 @@ data "aws_iam_policy_document" "bucket_policy" {
   }
 
   statement {
-    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
-    resources = ["${aws_s3_bucket.private_bucket.arn}"]
+    actions = ["s3:ListBucket", "s3:GetBucketLocation"]
+    resources = [
+      "${aws_s3_bucket.private_bucket.arn}",
+      "${aws_s3_bucket.private_bucket.arn}/*"
+    ]
   }
 }
 
@@ -708,72 +822,6 @@ resource "aws_iam_instance_profile" "ec2_instance_profile" {
 }
 
 
-
-
-#######################################
-# RDS (PostgreSQL) Configuration
-#######################################
-
-# RDS Parameter Group for PostgreSQL
-resource "aws_db_parameter_group" "db_param_group" {
-  name        = "${var.vpc_name}-rds1-params"
-  family      = "postgres13"
-  description = "Custom parameter group for ${var.db_engine}"
-
-  parameter {
-    name         = "max_connections"
-    value        = "150"
-    apply_method = "pending-reboot"
-  }
-
-  parameter {
-    name         = "log_statement"
-    value        = "all"
-    apply_method = "pending-reboot"
-  }
-
-  tags = {
-    Name = "${var.vpc_name}-db-param-group"
-  }
-}
-
-# RDS DB Subnet Group
-resource "aws_db_subnet_group" "db_subnet_group" {
-  name       = "${var.vpc_name}-db-subnet1-group"
-  subnet_ids = [aws_subnet.private_subnet_1.id, aws_subnet.private_subnet_2.id, aws_subnet.private_subnet_3.id]
-
-  tags = {
-    Name = "${var.vpc_name}-db-subnet1-group"
-  }
-}
-
-# RDS Instance for PostgreSQL 13
-resource "aws_db_instance" "db_instance" {
-  identifier             = "csye6225"
-  engine                 = var.db_engine
-  engine_version         = var.engine_version
-  instance_class         = var.instance_class
-  allocated_storage      = var.allocated_storage
-  db_subnet_group_name   = aws_db_subnet_group.db_subnet_group.name
-  vpc_security_group_ids = [aws_security_group.db_sg.id]
-  multi_az               = false
-  publicly_accessible    = false
-  username               = var.username
-  password               = var.db_password
-  parameter_group_name   = aws_db_parameter_group.db_param_group.name
-  db_name                = var.db_name
-  port                   = var.db_port
-
-  # Enable KMS Encryption
-  #kms_key_id = aws_kms_key.rds_kms.arn
-
-  #skip_final_snapshot = true
-  #apply_immediately   = true
-
-  tags = {
-    Name = "${var.vpc_name}-rds-instance"
-  }
-}
 
 
 
@@ -892,15 +940,17 @@ resource "aws_lambda_function" "email_verification_function" {
       DB_HOST = regex("^([^:]+)", aws_db_instance.db_instance.endpoint)[0]
       #aws_db_instance.db_instance.endpoint
 
-      DB_NAME             = var.db_name
-      DB_USERNAME         = var.username
-      DB_PASSWORD         = var.db_password
+      DB_NAME     = var.db_name
+      DB_USERNAME = var.username
+      #DB_PASSWORD         = aws_secretsmanager_secret.rds_password_secret.id
       SNS_TOPIC_ARN       = aws_sns_topic.email_verification.arn
       SENDGRID_FROM_EMAIL = var.ses_from_email
       REGION              = var.region
-      SENDGRID_API_KEY    = var.sendgrid_api_key
-      DB_PORT             = 5432
-      DOMAIN_NAME         = "${var.profile}.${var.domain_name}"
+      #SENDGRID_API_KEY    = var.sendgrid_api_key
+      DB_PORT              = 5432
+      DOMAIN_NAME          = "${var.profile}.${var.domain_name}"
+      RDS_SECRET_NAME      = aws_secretsmanager_secret.rds_password_secret.id
+      SENDGRID_SECRET_NAME = aws_secretsmanager_secret.email_service_secret.id
 
 
     }
@@ -951,7 +1001,7 @@ resource "aws_lambda_permission" "sns_permission" {
 
 # Allocate an Elastic IP for the NAT Gateway
 resource "aws_eip" "nat" {
-  vpc = true
+  domain = "vpc"
   tags = {
     Name = "${var.vpc_name}-nat-eip"
   }
@@ -976,6 +1026,221 @@ resource "aws_route" "private_nat_route" {
 
 
 
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+data "aws_acm_certificate" "certficate_issued" {
+  domain   = var.domain_name
+  statuses = ["ISSUED"]
+}
+
+
+# HTTPS Listener
+resource "aws_lb_listener" "app_listener" {
+  load_balancer_arn = aws_lb.app_load_balancer.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+
+  certificate_arn = data.aws_acm_certificate.certficate_issued.arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_target_group.arn
+  }
+}
+
+
+# Listener for Load Balancer
+#resource "aws_lb_listener" "app_listener" {
+#  load_balancer_arn = aws_lb.app_load_balancer.arn
+#  port              = 80
+#  protocol          = "HTTP"
+
+#  default_action {
+#    type             = "forward"
+#    target_group_arn = aws_lb_target_group.app_target_group.arn
+#  }
+#}
+
+
+
+#######################################
+# KMS Keys
+#######################################
+
+# Get AWS Account ID
+data "aws_caller_identity" "current" {}
+
+# Generate a Random Password for RDS
+resource "random_password" "rds_password" {
+  length           = 16
+  special          = true
+  override_special = "!#$%&*+-=?^_{|}~"
+}
+
+
+# KMS Key for EC2
+resource "aws_kms_key" "ec2_key" {
+  description             = "KMS key for EC2 volumes"
+  enable_key_rotation     = true
+  deletion_window_in_days = 10
+}
+
+# KMS Key for RDS
+resource "aws_kms_key" "rds_key" {
+  description             = "KMS key for RDS"
+  enable_key_rotation     = true
+  deletion_window_in_days = 10
+}
+
+# KMS Key for S3 Buckets
+resource "aws_kms_key" "s3_key" {
+  description             = "KMS key for S3 bucket encryption"
+  enable_key_rotation     = true
+  deletion_window_in_days = 10
+}
+
+# KMS Key for Secrets Manager
+resource "aws_kms_key" "secretsmanager_key" {
+  description             = "KMS key for encrypting Secrets Manager secrets"
+  enable_key_rotation     = true
+  deletion_window_in_days = 10
+}
+
+
+
+# Secrets Manager for RDS Password
+resource "aws_secretsmanager_secret" "rds_password_secret" {
+  name       = "rds-db-password-${random_uuid.s3_bucket_name.result}"
+  kms_key_id = aws_kms_key.secretsmanager_key.arn
+
+  tags = {
+    Name = "RDSPasswordSecret"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "rds_password_secret_version" {
+  secret_id = aws_secretsmanager_secret.rds_password_secret.id
+  secret_string = jsonencode({
+    username = var.username
+    password = random_password.rds_password.result
+  })
+}
+
+
+# Secrets Manager for Email Service Credentials
+resource "aws_secretsmanager_secret" "email_service_secret" {
+  name       = "email-service-credentials-${random_uuid.s3_bucket_name.result}"
+  kms_key_id = aws_kms_key.secretsmanager_key.arn
+
+  tags = {
+    Name = "EmailServiceSecret"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "email_service_secret_version" {
+  secret_id = aws_secretsmanager_secret.email_service_secret.id
+  secret_string = jsonencode({
+    api_key = var.sendgrid_api_key
+
+  })
+}
+
+
+
+resource "aws_iam_policy" "ec2_secretsmanager_policy" {
+  name        = "EC2SecretsManagerAccessPolicy"
+  description = "Policy to allow EC2 instances to access Secrets Manager"
+
+  policy = jsonencode({
+    Version : "2012-10-17",
+    Statement : [
+      {
+        Effect : "Allow",
+        Action : [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ],
+        #"${aws_secretsmanager_secret.rds_password_secret.arn}"
+        Resource : [
+          aws_secretsmanager_secret.rds_password_secret.arn,
+          aws_secretsmanager_secret.email_service_secret.arn
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_secretsmanager_policy_attachment" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = aws_iam_policy.ec2_secretsmanager_policy.arn
+}
+
+resource "aws_iam_policy" "ec2_kms_policy" {
+  name        = "EC2KMSAccessPolicy"
+  description = "Policy to allow EC2 instances to decrypt Secrets Manager keys"
+
+  policy = jsonencode({
+    Version : "2012-10-17",
+    Statement : [
+      {
+        Effect : "Allow",
+        Action : [
+          "kms:Decrypt",
+          "kms:GenerateDataKey"
+        ],
+        Resource : ["${aws_kms_key.secretsmanager_key.arn}",
+        "${aws_kms_key.s3_key.arn}"]
+      }
+    ]
+  })
+}
+
+
+
+resource "aws_iam_role_policy_attachment" "ec2_kms_policy_attachment" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = aws_iam_policy.ec2_kms_policy.arn
+}
+
+resource "aws_iam_policy" "lambda_secretsmanager_policy" {
+  name        = "LambdaSecretsManagerAccessPolicy"
+  description = "Policy for Lambda to access Secrets Manager"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey"
+        ],
+        Resource = [
+          aws_kms_key.secretsmanager_key.arn
+        ]
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ],
+        Resource = [
+          "${aws_secretsmanager_secret.rds_password_secret.arn}",
+          "${aws_secretsmanager_secret.email_service_secret.arn}"
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_secretsmanager_policy_attachment" {
+  role       = aws_iam_role.lambda_execution_role.name
+  policy_arn = aws_iam_policy.lambda_secretsmanager_policy.arn
+}
 #######################################
 # Outputs
 #######################################
