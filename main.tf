@@ -512,16 +512,16 @@ resource "aws_lb_target_group" "app_target_group" {
 }
 
 # Listener for Load Balancer
-resource "aws_lb_listener" "app_listener" {
-  load_balancer_arn = aws_lb.app_load_balancer.arn
-  port              = 80
-  protocol          = "HTTP"
+#resource "aws_lb_listener" "app_listener" {
+#  load_balancer_arn = aws_lb.app_load_balancer.arn
+#  port              = 80
+#  protocol          = "HTTP"
 
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.app_target_group.arn
-  }
-}
+#  default_action {
+#    type             = "forward"
+#    target_group_arn = aws_lb_target_group.app_target_group.arn
+#  }
+#}
 
 
 
@@ -1023,6 +1023,47 @@ resource "aws_route" "private_nat_route" {
   destination_cidr_block = "0.0.0.0/0"
   nat_gateway_id         = aws_nat_gateway.nat_gateway.id
 }
+
+
+
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+data "aws_acm_certificate" "certficate_issued" {
+  domain   = var.domain_name
+  statuses = ["ISSUED"]
+}
+
+
+# HTTPS Listener
+resource "aws_lb_listener" "app_listener" {
+  load_balancer_arn = aws_lb.app_load_balancer.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+
+  certificate_arn = data.aws_acm_certificate.certficate_issued.arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_target_group.arn
+  }
+}
+
+
+# Listener for Load Balancer
+#resource "aws_lb_listener" "app_listener" {
+#  load_balancer_arn = aws_lb.app_load_balancer.arn
+#  port              = 80
+#  protocol          = "HTTP"
+
+#  default_action {
+#    type             = "forward"
+#    target_group_arn = aws_lb_target_group.app_target_group.arn
+#  }
+#}
+
 
 
 #######################################
