@@ -1031,7 +1031,7 @@ data "aws_availability_zones" "available" {
 }
 
 data "aws_acm_certificate" "certficate_issued" {
-  domain   = var.domain_name
+  domain   = "${var.profile}.${var.domain_name}"
   statuses = ["ISSUED"]
 }
 
