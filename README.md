@@ -33,9 +33,15 @@ This project sets up and manages AWS infrastructure using **Terraform**. The con
 
 
 7. Import Certificate
-aws acm import-certificate ^
-  --certificate fileb://C:\path_to_your_certificate\demo_chetanwarad_me.crt ^
-  --private-key fileb://C:\path_to_your_certificate\privatekey.pem ^
-  --certificate-chain fileb://C:\path_to_your_certificate\demo_chetanwarad_me.ca-bundle ^
-  --region us-east-1 ^
-  --profile demo
+    ```bash
+    aws acm import-certificate ^
+        --certificate fileb://C:\Users\cheta\Desktop\Downloads\demo_chetanwarad.me\demo_chetanwarad_me.crt ^
+        --private-key fileb://C:\Users\cheta\Desktop\Downloads\demo_chetanwarad.me\privatekey.pem ^
+        --certificate-chain fileb://C:\Users\cheta\Desktop\Downloads\demo_chetanwarad.me\demo_chetanwarad_me.ca-bundle ^
+        --region us-east-1 ^
+        --profile demo
+
+8. List the certificate
+    ```bash
+    aws acm list-certificates --region us-east-1 --profile demo
+    
